@@ -12,12 +12,14 @@ namespace Bot.SpawnRouting
    public class SpawnMessageRouter
    {
       private readonly IConfigurationRoot _config;
+      private readonly RangeDmRouter _rangeRouter;
       private Dictionary<ulong, ulong> _routeMap = new Dictionary<ulong, ulong>();
       private Dictionary<int, ulong> _raidMap = new Dictionary<int, ulong>();
 
-      public SpawnMessageRouter( IConfigurationRoot config )
+      public SpawnMessageRouter( IConfigurationRoot config, RangeDmRouter rangeRouter )
       {
          _config = config;
+         _rangeRouter = rangeRouter;
          BuildRouteDictionary();
       }
 
@@ -49,8 +51,9 @@ namespace Bot.SpawnRouting
 
       private async Task ProcessRaidMessage( SocketUserMessage msg )
       {
+         var disableMessages = false;
          if( Convert.ToBoolean( _config["debug:DisableRaid"] ) )
-            return;
+            disableMessages = true;
 
          var embed = (msg.Embeds as IReadOnlyList<Embed>)[0];
          var descriptionLines = embed.Description.Split( "\n" );
@@ -71,22 +74,24 @@ namespace Bot.SpawnRouting
          if( targetChannel == null )
             return;
 
-         var roleName = String.Format( "{0}-r", embed.Title.Substring( 0, embed.Title.IndexOf( " " ) ) );
+         var pokemonName = embed.Title.Substring( 0, embed.Title.IndexOf( " " ) );
+         var roleName = String.Format( "{0}-r",  pokemonName );
          var raidRoleId = GetRole( (msg.Channel as SocketGuildChannel).Guild.Roles, roleName );
 
-         if( raidRoleId.HasValue )
+         if( raidRoleId.HasValue && !disableMessages )
          {
             await (targetChannel as ISocketMessageChannel).SendMessageAsync( MentionUtils.MentionRole( raidRoleId.Value ) );
          }
 
-         await (targetChannel as ISocketMessageChannel).SendMessageAsync( String.Empty, embed: embed );
+         if( !disableMessages )
+            await (targetChannel as ISocketMessageChannel).SendMessageAsync( String.Empty, embed: embed );
+
+         //range
+         await _rangeRouter.RoutePokemon( msg, embed, pokemonName );
       }
 
       private async Task ProcessMessage( SocketUserMessage msg, ulong destinationChannelId )
       {
-         if( Convert.ToBoolean( _config["debug:DisablePokemon"] ) )
-            return;
-
          var targetChannel = (msg.Channel as SocketGuildChannel).Guild.GetChannel( destinationChannelId );
          if( targetChannel == null )
             return;// Task.CompletedTask;
@@ -109,8 +114,10 @@ namespace Bot.SpawnRouting
          var pokemonName = matches[0].Groups["Name"].Value;
          var pokemonRoleId = GetRole( (msg.Channel as SocketGuildChannel).Guild.Roles, pokemonName );
 
+         var disableMessages = Convert.ToBoolean( _config["debug:DisablePokemon"] );
          //Basic routing, no IV here!
-         await SendMessageToDestination( embed, targetChannel, pokemonRoleId );
+         if( !disableMessages )
+            await SendMessageToDestination( embed, targetChannel, pokemonRoleId );
 
          //Check special cases...
          var percent = Convert.ToDecimal( matches[0].Groups["Iv"].Value );
@@ -121,8 +128,17 @@ namespace Bot.SpawnRouting
             var hundoChannel = (msg.Channel as SocketGuildChannel).Guild.GetChannel( hundoChannelId );
             var role100 = GetRole( (msg.Channel as SocketGuildChannel).Guild.Roles, "100" );
 
-            if( hundoChannel != null && role100 != null )
+            if( !disableMessages && hundoChannel != null && role100 != null )
                await SendMessageToDestination( embed, hundoChannel, role100, false, pokemonName );
+         }
+         else if( percent == 0.0m )
+         {
+            var spamChannelId = Convert.ToUInt64( _config["channels:DittoSpam"] );
+            var spamChannel = (msg.Channel as SocketGuildChannel).Guild.GetChannel( spamChannelId );
+            var role0 = GetRole( (msg.Channel as SocketGuildChannel).Guild.Roles, "0" );
+
+            if( !disableMessages && spamChannel != null && role0 != null )
+               await SendMessageToDestination( embed, spamChannel, role0, false, pokemonName );
          }
 
          //Perfect and Lvl30+ channel
@@ -132,9 +148,12 @@ namespace Bot.SpawnRouting
             var perfectChannel = (msg.Channel as SocketGuildChannel).Guild.GetChannel( perfectChannelId );
             var rolePerfect = GetRole( (msg.Channel as SocketGuildChannel).Guild.Roles, "lvl30+" );
 
-            if( perfectChannel != null && rolePerfect != 100 )
+            if( !disableMessages && perfectChannel != null && rolePerfect != 100 )
                await SendMessageToDestination( embed, perfectChannel, rolePerfect, false, pokemonName );
          }
+
+
+         await _rangeRouter.RoutePokemon( msg, embed, pokemonName );
       }
 
       private ulong? GetRole( IReadOnlyCollection<SocketRole> roles, string pokemonName )
